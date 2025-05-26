@@ -4,13 +4,106 @@ use clippy_utils::{is_trait_method, path_to_local_id, peel_blocks, strip_pat_ref
 use rustc_ast::ast;
 use rustc_data_structures::packed::Pu128;
 use rustc_errors::Applicability;
-use rustc_hir as hir;
-use rustc_hir::PatKind;
+use rustc_hir::intravisit::{Visitor, walk_expr};
+use rustc_hir::{self as hir, PatKind};
 use rustc_lint::LateContext;
 use rustc_middle::ty;
 use rustc_span::{Span, sym};
 
+use crate::methods::method_call;
+
 use super::UNNECESSARY_FOLD;
+
+struct SideEffectVisitor<'cx, 'tcx> {
+    cx: &'cx LateContext<'tcx>,
+    likely_side_effect: bool,
+}
+
+impl<'tcx> Visitor<'tcx> for SideEffectVisitor<'_, 'tcx> {
+    fn visit_expr(&mut self, e: &'tcx hir::Expr<'_>) {
+        match e.kind {
+            hir::ExprKind::Call(..) => {
+                if self
+                    .cx
+                    .typeck_results()
+                    .type_dependent_def_id(e.hir_id)
+                    .map(|id| {
+                        self.cx.tcx.fn_sig(id).skip_binder().inputs().iter().any(|input| {
+                            let input = input.skip_binder();
+                            input.is_mutable_ptr() || input.ref_mutability().map(|m| m.is_mut()).unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+                {
+                    self.likely_side_effect = true;
+                }
+            },
+            hir::ExprKind::MethodCall(..) => {
+                if self
+                    .cx
+                    .typeck_results()
+                    .type_dependent_def_id(e.hir_id)
+                    .map(|id| {
+                        self.cx.tcx.fn_sig(id).skip_binder().inputs().iter().any(|input| {
+                            let input = input.skip_binder();
+                            input.is_mutable_ptr() || input.ref_mutability().map(|m| m.is_mut()).unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+                {
+                    self.likely_side_effect = true;
+                }
+            },
+            hir::ExprKind::Closure(closure) => {
+                // Check if the closure captures any mutable variables
+                for param in closure.fn_decl.inputs {
+                    match param.kind {
+                        hir::TyKind::Ref(_, mut_ty) | hir::TyKind::Ptr(mut_ty) => {
+                            if mut_ty.mutbl.is_mut() {
+                                self.likely_side_effect = true;
+                                break;
+                            }
+                        },
+                        _ => {},
+                    }
+                }
+            },
+            _ => {},
+        }
+
+        walk_expr(self, e);
+    }
+}
+
+fn is_side_effect_free(cx: &LateContext<'_>, recv: &hir::Expr<'_>) -> bool {
+    let mut v = SideEffectVisitor {
+        cx,
+        likely_side_effect: false,
+    };
+
+    let mut curr = recv;
+    while is_trait_method(cx, curr, sym::Iterator)
+        && let Some((sym, recv, args, _, _)) = method_call(curr)
+    {
+        v.visit_expr(curr);
+        // println!(
+        //     "Found sym {} and type {:?}",
+        //     sym,
+        //     cx.typeck_results()
+        //         .type_dependent_def_id(curr.hir_id)
+        //         .map(|def_id| cx.tcx.def_path_str(def_id))
+        // );
+        // for arg in args.iter() {
+        //     v.visit_expr(arg);
+        // }
+
+        // v.likely_side_effect;
+
+        curr = recv;
+    }
+
+    true
+}
 
 /// Do we need to suggest turbofish when suggesting a replacement method?
 /// Changing `fold` to `sum` needs it sometimes when the return type can't be
@@ -60,6 +153,8 @@ fn check_fold_with_op(
     op: hir::BinOpKind,
     replacement: Replacement,
 ) {
+    is_side_effect_free(cx, expr);
+
     if let hir::ExprKind::Closure(&hir::Closure { body, .. }) = acc.kind
         // Extract the body of the closure passed to fold
         && let closure_body = cx.tcx.hir_body(body)
@@ -110,6 +205,7 @@ fn check_fold_with_op(
 pub(super) fn check(
     cx: &LateContext<'_>,
     expr: &hir::Expr<'_>,
+    recv: &hir::Expr<'_>,
     init: &hir::Expr<'_>,
     acc: &hir::Expr<'_>,
     fold_span: Span,

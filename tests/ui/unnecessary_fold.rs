@@ -1,5 +1,15 @@
 #![allow(dead_code)]
 
+fn unnecessary_fold_my() {
+    let mut vec = Vec::new();
+    let _ = (0..3)
+        .map(|e| {
+            vec.push(e);
+            e
+        })
+        .fold(false, |acc, x| acc || x > 2);
+}
+
 fn is_any(acc: bool, x: usize) -> bool {
     acc || x > 2
 }

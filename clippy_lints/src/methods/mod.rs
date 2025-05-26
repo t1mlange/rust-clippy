@@ -5124,7 +5124,7 @@ impl Methods {
                 },
                 (sym::fold, [init, acc]) => {
                     manual_try_fold::check(cx, expr, init, acc, call_span, self.msrv);
-                    unnecessary_fold::check(cx, expr, init, acc, span);
+                    unnecessary_fold::check(cx, expr, recv, init, acc, span);
                 },
                 (sym::for_each, [arg]) => {
                     unused_enumerate_index::check(cx, expr, recv, arg);
